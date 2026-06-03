@@ -266,6 +266,8 @@ Copy `firestore_ha_bridge/` to `addons/local/firestore_ha_bridge/`, then **Check
 
 Sensitive add-on fields (`org_id`, `setup_id`, tokens, keys, pairing code) use **masked** inputs in the Home Assistant configuration UI. URLs and the Firebase project id stay visible for easier verification.
 
+**Pairing code (temporary):** paste a desktop-generated code for first-time pairing only. After a successful pair, the add-on **clears `pairing_code` automatically** and restarts once (v0.1.2+). Codes also expire on the server after ~10 minutes.
+
 ### Add-on options
 
 | Field | Required | Masked in HA UI | Description |

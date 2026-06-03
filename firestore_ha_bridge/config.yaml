@@ -1,5 +1,5 @@
 name: Firestore HA Bridge
-version: 0.1.1
+version: 0.1.2
 slug: firestore_ha_bridge
 description: Outbound Firestore listener for remote Home Assistant lighting (no public HA URL on clients)
 arch:
@@ -10,6 +10,7 @@ startup: application
 boot: auto
 init: false
 watchdog: firestore-ha-bridge
+hassio_api: true
 options:
   org_id: ""
   setup_id: ""
