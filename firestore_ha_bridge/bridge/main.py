@@ -19,7 +19,7 @@ from firebase_client import FirebaseSession
 from ha_client import HomeAssistantClient
 
 LOG = logging.getLogger("firestore-ha-bridge")
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 DATA_DIR = Path(os.environ.get("FIRESTORE_BRIDGE_DATA_DIR", "/data"))
 CREDENTIALS_PATH = DATA_DIR / "bridge_credentials.json"
 

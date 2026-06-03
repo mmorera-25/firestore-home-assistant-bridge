@@ -264,22 +264,24 @@ Copy `firestore_ha_bridge/` to `addons/local/firestore_ha_bridge/`, then **Check
 
 ## Configure and pair
 
+Sensitive add-on fields (`org_id`, `setup_id`, tokens, keys, pairing code) use **masked** inputs in the Home Assistant configuration UI. URLs and the Firebase project id stay visible for easier verification.
+
 ### Add-on options
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `org_id` | Yes | Tenant id — `{orgId}` in Firestore paths |
-| `setup_id` | Yes | Bridge scope — command queue + state doc |
-| `edge_base_url` | Yes | Pairing API origin, no trailing slash |
-| `ha_base_url` | Yes | Default `http://homeassistant:8123` on HA OS |
-| `ha_access_token` | Yes | HA long-lived token (Pi only) |
-| `firebase_api_key` | Yes | Firebase Web API key |
-| `firebase_project_id` | Yes | Firebase project id |
-| `pairing_code` | First run | From control app until `/data/bridge_credentials.json` exists |
-| `device_id` | No | Auto-generated if blank |
-| `poll_interval_seconds` | No | Default `2` |
-| `state_interval_seconds` | No | Default `15` |
-| `heartbeat_interval_seconds` | No | Default `30` |
+| Field | Required | Masked in HA UI | Description |
+|-------|----------|-----------------|-------------|
+| `org_id` | Yes | Yes | Tenant id — `{orgId}` in Firestore paths |
+| `setup_id` | Yes | Yes | Bridge scope — command queue + state doc |
+| `edge_base_url` | Yes | No | Pairing API origin, no trailing slash |
+| `ha_base_url` | Yes | No | Default `http://homeassistant:8123` on HA OS |
+| `ha_access_token` | Yes | Yes | HA long-lived token (Pi only) |
+| `firebase_api_key` | Yes | Yes | Firebase Web API key |
+| `firebase_project_id` | Yes | No | Firebase project id |
+| `pairing_code` | First run | Yes | From control app until `/data/bridge_credentials.json` exists |
+| `device_id` | No | Yes | Auto-generated if blank |
+| `poll_interval_seconds` | No | No | Default `2` |
+| `state_interval_seconds` | No | No | Default `15` |
+| `heartbeat_interval_seconds` | No | No | Default `30` |
 
 ### Example
 
