@@ -1,0 +1,7 @@
+{
+  "name": "firestore-home-assistant-bridge",
+  "private": true,
+  "scripts": {
+    "push": "bash scripts/push-to-github.sh"
+  }
+}
