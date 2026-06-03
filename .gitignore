@@ -7,3 +7,7 @@ venv/
 .DS_Store
 *.log
 node_modules/
+
+# Operator-specific notes (Resonare URLs, org ids, church values)
+RESONARE-SETUP.local.md
+docs/internal/
