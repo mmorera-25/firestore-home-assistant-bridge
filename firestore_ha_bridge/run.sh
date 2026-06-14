@@ -4,6 +4,7 @@
 set -euo pipefail
 
 export FIRESTORE_BRIDGE_DATA_DIR="/data"
+export ADDON_VERSION="$(bashio::addon.version)"
 export ORG_ID="$(bashio::config 'org_id')"
 export SETUP_ID="$(bashio::config 'setup_id')"
 export DEVICE_ID="$(bashio::config 'device_id')"

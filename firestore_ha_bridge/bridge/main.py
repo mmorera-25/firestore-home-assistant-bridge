@@ -20,9 +20,16 @@ from ha_client import HomeAssistantClient
 from supervisor_options import clear_pairing_code_option, request_addon_restart
 
 LOG = logging.getLogger("firestore-ha-bridge")
-VERSION = "0.1.2"
+VERSION = os.environ.get("ADDON_VERSION", "0.1.5").strip() or "0.1.5"
 DATA_DIR = Path(os.environ.get("FIRESTORE_BRIDGE_DATA_DIR", "/data"))
 CREDENTIALS_PATH = DATA_DIR / "bridge_credentials.json"
+
+
+def normalize_optional_config(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned or cleaned.lower() == "null":
+        return ""
+    return cleaned
 
 
 def utc_now_iso() -> str:
@@ -30,11 +37,17 @@ def utc_now_iso() -> str:
 
 
 def read_config() -> dict[str, Any]:
-    org_id = os.environ.get("ORG_ID", "").strip()
-    setup_id = os.environ.get("SETUP_ID", "").strip()
-    device_id = os.environ.get("DEVICE_ID", "").strip() or str(uuid.uuid4())
-    edge_base_url = os.environ.get("EDGE_BASE_URL", "").strip().rstrip("/")
-    pairing_code = os.environ.get("PAIRING_CODE", "").strip()
+    org_id = normalize_optional_config(os.environ.get("ORG_ID", ""))
+    setup_id = normalize_optional_config(os.environ.get("SETUP_ID", ""))
+    device_id = normalize_optional_config(os.environ.get("DEVICE_ID", ""))
+    if not device_id:
+        stored = load_credentials()
+        if stored and stored.get("device_id"):
+            device_id = stored["device_id"]
+    if not device_id:
+        device_id = str(uuid.uuid4())
+    edge_base_url = normalize_optional_config(os.environ.get("EDGE_BASE_URL", "")).rstrip("/")
+    pairing_code = normalize_optional_config(os.environ.get("PAIRING_CODE", ""))
     ha_base_url = os.environ.get("HA_BASE_URL", "http://homeassistant:8123").strip().rstrip("/")
     ha_access_token = os.environ.get("HA_ACCESS_TOKEN", "").strip()
     firebase_api_key = os.environ.get("FIREBASE_API_KEY", "").strip()
@@ -64,18 +77,29 @@ def load_credentials() -> dict[str, str] | None:
         return None
     try:
         payload = json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
-        refresh_token = str(payload.get("refresh_token", "")).strip()
-        if refresh_token:
-            return {"refresh_token": refresh_token}
+        refresh_token = normalize_optional_config(str(payload.get("refresh_token", "")))
+        if not refresh_token:
+            return None
+        stored: dict[str, str] = {"refresh_token": refresh_token}
+        device_id = normalize_optional_config(str(payload.get("device_id", "")))
+        if device_id:
+            stored["device_id"] = device_id
+        return stored
     except (OSError, json.JSONDecodeError):
         return None
-    return None
 
 
-def save_credentials(refresh_token: str) -> None:
+def clear_credentials() -> None:
+    try:
+        CREDENTIALS_PATH.unlink(missing_ok=True)
+    except OSError as error:
+        LOG.warning("Could not remove stored bridge credentials: %s", error)
+
+
+def save_credentials(refresh_token: str, device_id: str) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     CREDENTIALS_PATH.write_text(
-        json.dumps({"refresh_token": refresh_token}, indent=2),
+        json.dumps({"refresh_token": refresh_token, "device_id": device_id}, indent=2),
         encoding="utf-8",
     )
 
@@ -111,7 +135,7 @@ def pair_device(config: dict[str, Any]) -> FirebaseSession:
         project_id=config["firebase_project_id"],
     )
     session.sign_in_with_custom_token(custom_token)
-    save_credentials(session.refresh_token)
+    save_credentials(session.refresh_token, config["device_id"])
     LOG.info("Paired bridge device %s for org %s", config["device_id"], config["org_id"])
     if clear_pairing_code_option():
         request_addon_restart()
@@ -125,8 +149,23 @@ def resolve_firebase_session(config: dict[str, Any]) -> FirebaseSession:
     )
     stored = load_credentials()
     if stored:
-        session.refresh_with_token(stored["refresh_token"])
-        return session
+        try:
+            session.refresh_with_token(stored["refresh_token"])
+            return session
+        except RuntimeError as error:
+            if "USER_NOT_FOUND" not in str(error):
+                raise
+            LOG.warning(
+                "Stored Firebase credentials are invalid (USER_NOT_FOUND). "
+                "Clearing saved credentials; set pairing_code and restart to pair again."
+            )
+            clear_credentials()
+            if not config["pairing_code"]:
+                raise RuntimeError(
+                    "Stored Firebase credentials are invalid. "
+                    "Generate a new pairing code on desktop, set pairing_code, and restart."
+                ) from error
+            return pair_device(config)
     return pair_device(config)
 
 

@@ -1,5 +1,5 @@
 name: Firestore HA Bridge
-version: 0.1.4
+version: 0.1.5
 slug: firestore_ha_bridge
 description: Outbound Firestore listener for remote Home Assistant lighting (no public HA URL on clients)
 url: https://github.com/mmorera-25/firestore-home-assistant-bridge
