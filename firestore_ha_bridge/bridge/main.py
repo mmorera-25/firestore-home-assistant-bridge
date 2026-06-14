@@ -20,7 +20,7 @@ from ha_client import HomeAssistantClient
 from supervisor_options import clear_pairing_code_option, persist_device_id_option, request_addon_restart
 
 LOG = logging.getLogger("firestore-ha-bridge")
-VERSION = os.environ.get("ADDON_VERSION", "0.1.7").strip() or "0.1.7"
+VERSION = os.environ.get("ADDON_VERSION", "0.1.8").strip() or "0.1.8"
 DATA_DIR = Path(os.environ.get("FIRESTORE_BRIDGE_DATA_DIR", "/data"))
 CREDENTIALS_PATH = DATA_DIR / "bridge_credentials.json"
 
@@ -232,23 +232,28 @@ class BridgeRuntime:
                 LOG.warning("Heartbeat failed: %s", error)
             self._stop.wait(self.config["heartbeat_interval"])
 
+    def publish_state_snapshot(self) -> None:
+        org_doc = self.firebase.get_document(f"organizations/{self.config['org_id']}")
+        entity_ids = extract_light_entity_ids(org_doc, self.config["setup_id"])
+        if not entity_ids:
+            return
+
+        lights = self.ha.fetch_light_states(entity_ids)
+        self.firebase.upsert_document(
+            f"organizations/{self.config['org_id']}/integrations/homeAssistantBridge/state/{self.config['setup_id']}",
+            {
+                "setupId": self.config["setup_id"],
+                "organizationId": self.config["org_id"],
+                "updatedAt": utc_now_iso(),
+                "bridgeDeviceId": self.config["device_id"],
+                "lights": lights,
+            },
+        )
+
     def state_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                org_doc = self.firebase.get_document(f"organizations/{self.config['org_id']}")
-                entity_ids = extract_light_entity_ids(org_doc, self.config["setup_id"])
-                if entity_ids:
-                    lights = self.ha.fetch_light_states(entity_ids)
-                    self.firebase.upsert_document(
-                        f"organizations/{self.config['org_id']}/integrations/homeAssistantBridge/state/{self.config['setup_id']}",
-                        {
-                            "setupId": self.config["setup_id"],
-                            "organizationId": self.config["org_id"],
-                            "updatedAt": utc_now_iso(),
-                            "bridgeDeviceId": self.config["device_id"],
-                            "lights": lights,
-                        },
-                    )
+                self.publish_state_snapshot()
             except Exception as error:  # noqa: BLE001
                 LOG.warning("State publish failed: %s", error)
             self._stop.wait(self.config["state_interval"])
@@ -287,6 +292,11 @@ class BridgeRuntime:
                 "status": "applied",
                 "processedAt": utc_now_iso(),
             })
+            if command_type in {"lightSet", "lightOff", "sceneActivate"}:
+                try:
+                    self.publish_state_snapshot()
+                except Exception as error:  # noqa: BLE001
+                    LOG.warning("Post-command state publish failed: %s", error)
         except Exception as error:  # noqa: BLE001
             LOG.exception("Command %s failed", command_id)
             self.firebase.patch_document(base_path, {
