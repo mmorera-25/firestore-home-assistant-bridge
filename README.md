@@ -280,7 +280,7 @@ Sensitive add-on fields (`org_id`, `setup_id`, tokens, keys, pairing code) use *
 | `firebase_api_key` | Yes | Yes | Firebase Web API key |
 | `firebase_project_id` | Yes | No | Firebase project id |
 | `pairing_code` | First run | Yes | From control app until `/data/bridge_credentials.json` exists |
-| `device_id` | No | Yes | Auto-generated if blank |
+| `device_id` | No | Yes | Leave blank — auto-generated on first pair and saved to add-on config (v0.1.6+) |
 | `poll_interval_seconds` | No | No | Default `2` |
 | `state_interval_seconds` | No | No | Default `15` |
 | `heartbeat_interval_seconds` | No | No | Default `30` |

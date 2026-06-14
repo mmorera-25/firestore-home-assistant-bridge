@@ -41,6 +41,39 @@ def _read_addon_options(headers: dict[str, str]) -> dict[str, Any] | None:
     return dict(options)
 
 
+def persist_device_id_option(device_id: str) -> bool:
+    """Write generated device_id into add-on options when HA left it blank/null."""
+    normalized = device_id.strip()
+    if not normalized or normalized.lower() == "null":
+        return False
+
+    headers = _supervisor_headers()
+    if not headers:
+        return False
+
+    options = _read_addon_options(headers)
+    if options is None:
+        return False
+
+    current = str(options.get("device_id", "")).strip()
+    if current and current.lower() != "null":
+        return True
+
+    options["device_id"] = normalized
+    response = requests.post(
+        f"{_supervisor_base_url()}/addons/self/options",
+        headers={**headers, "Content-Type": "application/json"},
+        json={"options": options},
+        timeout=15,
+    )
+    if not response.ok:
+        LOG.warning("Could not persist device_id in add-on options (%s): %s", response.status_code, response.text)
+        return False
+
+    LOG.info("Saved device_id to add-on configuration.")
+    return True
+
+
 def clear_pairing_code_option() -> bool:
     """Remove pairing_code from persisted add-on options after successful pairing."""
     headers = _supervisor_headers()

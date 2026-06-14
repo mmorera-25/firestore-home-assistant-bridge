@@ -17,7 +17,7 @@ from typing import Any
 
 from firebase_client import FirebaseSession
 from ha_client import HomeAssistantClient
-from supervisor_options import clear_pairing_code_option, request_addon_restart
+from supervisor_options import clear_pairing_code_option, persist_device_id_option, request_addon_restart
 
 LOG = logging.getLogger("firestore-ha-bridge")
 VERSION = os.environ.get("ADDON_VERSION", "0.1.5").strip() or "0.1.5"
@@ -137,6 +137,7 @@ def pair_device(config: dict[str, Any]) -> FirebaseSession:
     session.sign_in_with_custom_token(custom_token)
     save_credentials(session.refresh_token, config["device_id"])
     LOG.info("Paired bridge device %s for org %s", config["device_id"], config["org_id"])
+    persist_device_id_option(config["device_id"])
     if clear_pairing_code_option():
         request_addon_restart()
     return session
