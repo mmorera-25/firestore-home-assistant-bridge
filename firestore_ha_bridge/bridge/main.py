@@ -20,7 +20,7 @@ from ha_client import HomeAssistantClient
 from supervisor_options import clear_pairing_code_option, persist_device_id_option, request_addon_restart
 
 LOG = logging.getLogger("firestore-ha-bridge")
-VERSION = os.environ.get("ADDON_VERSION", "0.1.5").strip() or "0.1.5"
+VERSION = os.environ.get("ADDON_VERSION", "0.1.7").strip() or "0.1.7"
 DATA_DIR = Path(os.environ.get("FIRESTORE_BRIDGE_DATA_DIR", "/data"))
 CREDENTIALS_PATH = DATA_DIR / "bridge_credentials.json"
 
@@ -267,6 +267,7 @@ class BridgeRuntime:
             command_type = str(command.get("type", ""))
             if command_type == "ping":
                 self.ha.ping()
+                LOG.info("Command %s applied (ping ok)", command_id)
             elif command_type == "lightSet":
                 entity_id = str(command.get("entityId", ""))
                 brightness = command.get("brightnessPct")
@@ -301,9 +302,20 @@ class BridgeRuntime:
                     self.config["org_id"],
                     self.config["setup_id"],
                 )
+                if pending:
+                    LOG.info(
+                        "Found %d pending command(s) for setup %s",
+                        len(pending),
+                        self.config["setup_id"],
+                    )
                 for command_id, command in pending:
                     if self._stop.is_set():
                         break
+                    LOG.info(
+                        "Processing command %s type=%s",
+                        command_id,
+                        command.get("type", ""),
+                    )
                     self.process_command(command_id, command)
             except Exception as error:  # noqa: BLE001
                 LOG.warning("Command poll failed: %s", error)
