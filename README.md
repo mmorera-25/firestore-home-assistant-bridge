@@ -320,6 +320,8 @@ device_id: ""
 | Build failed installing add-on | Missing base image / pip on Alpine | Update to latest add-on version; **Check for updates**; see Supervisor log for `BUILD_FROM` or `pip` errors |
 | HA errors in logs | Bad token or HA down | New token; verify `ha_base_url` |
 | Stale `lastSeen` | Firebase auth failure | Check `firebase_api_key` / `firebase_project_id` |
+| `USER_NOT_FOUND` on startup | Stale credentials after revoke or failed pair | v0.1.5+ clears bad credentials; set fresh `pairing_code` and restart |
+| Log shows `device=null` | HA sends literal `null` for empty optional fields | v0.1.5+ treats `null` as blank; optional: set stable `device_id` UUID |
 | Firestore permission denied | Rules or token claims wrong | Deploy rules; verify `haBridgeOrgId` / `haBridgeDeviceId` |
 | Commands work, no light state | Org document missing entity list | Add `settings.integrations.homeAssistant.setups[].lights` |
 | Firestore index error in logs | Missing composite index | Add index on `commands`: setupId, status, issuedAt |
