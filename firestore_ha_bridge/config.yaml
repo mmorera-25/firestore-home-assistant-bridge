@@ -1,7 +1,8 @@
 name: Firestore HA Bridge
-version: 0.1.2
+version: 0.1.3
 slug: firestore_ha_bridge
 description: Outbound Firestore listener for remote Home Assistant lighting (no public HA URL on clients)
+url: https://github.com/mmorera-25/firestore-home-assistant-bridge
 arch:
   - aarch64
   - armv7
@@ -9,14 +10,11 @@ arch:
 startup: application
 boot: auto
 init: false
-watchdog: firestore-ha-bridge
 hassio_api: true
 options:
   org_id: ""
   setup_id: ""
-  device_id: ""
   edge_base_url: ""
-  pairing_code: ""
   ha_base_url: "http://homeassistant:8123"
   ha_access_token: ""
   firebase_api_key: ""
@@ -38,4 +36,4 @@ schema:
   state_interval_seconds: int(5,120)?
   heartbeat_interval_seconds: int(10,120)?
 map:
-  - config: /data
+  - data

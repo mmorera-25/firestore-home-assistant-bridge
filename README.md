@@ -313,7 +313,7 @@ device_id: ""
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| Add-on not in app store | Repository missing or stale | Add repo URL; **Check for updates** |
+| Add-on not in app store | Repository missing, stale store, or invalid `config.yaml` | Add repo URL; **Check for updates**; check **Supervisor → Log** for `Invalid Add-on config` on this repo |
 | `PAIRING_CODE is required` | No stored credentials | Set `pairing_code`; start within TTL |
 | `Pairing failed` / 503 | Pairing API or service account missing | Deploy backend; check `edge_base_url` |
 | `Invalid or expired pairing code` | Wrong/expired code or org/setup mismatch | New code; match `org_id` + `setup_id` |
