@@ -317,6 +317,7 @@ device_id: ""
 | `PAIRING_CODE is required` | No stored credentials | Set `pairing_code`; start within TTL |
 | `Pairing failed` / 503 | Pairing API or service account missing | Deploy backend; check `edge_base_url` |
 | `Invalid or expired pairing code` | Wrong/expired code or org/setup mismatch | New code; match `org_id` + `setup_id` |
+| Build failed installing add-on | Missing base image / pip on Alpine | Update to latest add-on version; **Check for updates**; see Supervisor log for `BUILD_FROM` or `pip` errors |
 | HA errors in logs | Bad token or HA down | New token; verify `ha_base_url` |
 | Stale `lastSeen` | Firebase auth failure | Check `firebase_api_key` / `firebase_project_id` |
 | Firestore permission denied | Rules or token claims wrong | Deploy rules; verify `haBridgeOrgId` / `haBridgeDeviceId` |
