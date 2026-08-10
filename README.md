@@ -74,7 +74,7 @@ function isHaBridgeDevice(orgId) {
 
 #### Document: `devices/{deviceId}`
 
-Written by the add-on (heartbeat, default every 30s).
+Written by the add-on (heartbeat, default every 60s).
 
 | Field | Type | Notes |
 |-------|------|--------|
@@ -222,7 +222,7 @@ The add-on does not include a control app.
 ```mermaid
 flowchart LR
   Client[Control app] -->|"Firestore write/read"| FS[(Firestore)]
-  FS -->|"poll + heartbeat"| Bridge[This add-on]
+  FS -->|"listen + heartbeat"| Bridge[This add-on]
   Bridge -->|"http://homeassistant:8123"| HA[Home Assistant]
 ```
 
@@ -237,12 +237,14 @@ sequenceDiagram
   App->>Pi: Operator enters code in add-on config
   Pi->>API: POST /bridge/pair
   API-->>Pi: customToken
-  Pi->>FS: sign in + poll commands + publish state
+  Pi->>FS: sign in + listen commands + publish state
   App->>FS: create pending commands
-  Pi->>FS: update command status
+  Pi->>FS: claim and update command status
 ```
 
 On first run the add-on calls your pairing API, stores refresh credentials in `/data/bridge_credentials.json`, then uses Firestore until credentials expire or are cleared.
+
+**Quota guards (v0.1.10+):** pending commands use Firestore listen/push (with a slow catch-up poll); state/heartbeat default to 60s and skip unchanged state; PATCH-first upserts after restart; command claim/idempotency + TTL cleanup; write-rate circuit breaker; clean exit on `USER_DISABLED`. Legacy interval options (e.g. poll `2`, state `15`) remain valid in the add-on schema and are clamped in Python.
 
 ---
 
@@ -281,9 +283,9 @@ Sensitive add-on fields (`org_id`, `setup_id`, tokens, keys, pairing code) use *
 | `firebase_project_id` | Yes | No | Firebase project id |
 | `pairing_code` | First run | Yes | From control app until `/data/bridge_credentials.json` exists |
 | `device_id` | No | Yes | Leave blank — auto-generated on first pair and saved to add-on config (v0.1.6+) |
-| `poll_interval_seconds` | No | No | Default `2` |
-| `state_interval_seconds` | No | No | Default `15` |
-| `heartbeat_interval_seconds` | No | No | Default `30` |
+| `poll_interval_seconds` | No | No | Catch-up poll interval (listen is primary). Default `10`. Schema accepts `1–300`; runtime clamps below `5` up to `5`. |
+| `state_interval_seconds` | No | No | Default `60`. Schema accepts `1–300`; runtime clamps below `30` up to `30`. |
+| `heartbeat_interval_seconds` | No | No | Default `60`. Schema accepts `1–300`; runtime clamps below `30` up to `30`. |
 
 ### Example
 

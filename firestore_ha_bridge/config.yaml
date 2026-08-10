@@ -1,5 +1,5 @@
 name: Firestore HA Bridge
-version: 0.1.8
+version: 0.1.10
 slug: firestore_ha_bridge
 description: Outbound Firestore listener for remote Home Assistant lighting (no public HA URL on clients)
 url: https://github.com/mmorera-25/firestore-home-assistant-bridge
@@ -19,9 +19,9 @@ options:
   ha_access_token: ""
   firebase_api_key: ""
   firebase_project_id: ""
-  poll_interval_seconds: 2
-  state_interval_seconds: 15
-  heartbeat_interval_seconds: 30
+  poll_interval_seconds: 10
+  state_interval_seconds: 60
+  heartbeat_interval_seconds: 60
 schema:
   org_id: password
   setup_id: password
@@ -32,8 +32,9 @@ schema:
   ha_access_token: password
   firebase_api_key: password
   firebase_project_id: str
-  poll_interval_seconds: int(1,30)?
-  state_interval_seconds: int(5,120)?
-  heartbeat_interval_seconds: int(10,120)?
+  # Wide ranges accept legacy saved options (e.g. poll=2, state=15); Python clamps to safe mins.
+  poll_interval_seconds: int(1,300)?
+  state_interval_seconds: int(1,300)?
+  heartbeat_interval_seconds: int(1,300)?
 map:
   - data
