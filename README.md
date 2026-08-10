@@ -244,6 +244,8 @@ sequenceDiagram
 
 On first run the add-on calls your pairing API, stores refresh credentials in `/data/bridge_credentials.json`, then uses Firestore until credentials expire or are cleared.
 
+**Idle pause (v0.1.14+):** after `idle_pause_hours` (default 2) with no lighting commands, the add-on pauses heartbeat/state writes (`devices` status → `idle`) but keeps listening/polling for pending commands and refreshes Firebase auth. The next command auto-resumes — no Supervisor restart. This also addresses the old ~60‑minute “stuck until restart” failure (expired ID token).
+
 **Church-Pi safety (v0.1.13+):** atomic credential writes; HA ping retries on startup (no crash-loop if HA is briefly down during update); Dockerfile installs `requests` hard and google listen SDKs soft; command status patches retry; light state fingerprint uses `entity_id` correctly.
 
 **Quota / auth hardening (v0.1.12+):** REST ID tokens refresh before expiry and rotated refresh tokens are persisted; credential wipe only on hard auth death (not transient 401/403); `org_id` is lowercased to match Edge claims; paired `device_id` wins over edited options; TTL cleanup orders by `processedAt`; google listen SDKs install best-effort so Alpine/arm builds still succeed.
@@ -290,6 +292,7 @@ Sensitive add-on fields (`org_id`, `setup_id`, tokens, keys, pairing code) use *
 | `poll_interval_seconds` | No | No | Catch-up poll interval (listen is primary). Default `10`. Schema accepts `1–300`; runtime clamps below `5` up to `5`. |
 | `state_interval_seconds` | No | No | Default `60`. Schema accepts `1–300`; runtime clamps below `30` up to `30`. |
 | `heartbeat_interval_seconds` | No | No | Default `60`. Schema accepts `1–300`; runtime clamps below `30` up to `30`. |
+| `idle_pause_hours` | No | No | Default `2`. After this many hours with **no lighting commands**, pause heartbeat/state writes to save Firestore quota. Keeps a slow pending-command poll + listen so the next command **auto-resumes** (no add-on restart). Set `0` to disable. |
 
 ### Example
 

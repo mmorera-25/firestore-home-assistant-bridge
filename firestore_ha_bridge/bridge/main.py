@@ -20,7 +20,7 @@ from ha_client import HomeAssistantClient
 from supervisor_options import clear_pairing_code_option, persist_device_id_option, request_addon_restart
 
 LOG = logging.getLogger("firestore-ha-bridge")
-VERSION = os.environ.get("ADDON_VERSION", "0.1.13").strip() or "0.1.13"
+VERSION = os.environ.get("ADDON_VERSION", "0.1.14").strip() or "0.1.14"
 DATA_DIR = Path(os.environ.get("FIRESTORE_BRIDGE_DATA_DIR", "/data"))
 CREDENTIALS_PATH = DATA_DIR / "bridge_credentials.json"
 
@@ -28,6 +28,10 @@ DEFAULT_STATE_INTERVAL = 60.0
 DEFAULT_HEARTBEAT_INTERVAL = 60.0
 # Safety poll when listen is unavailable / as catch-up between snapshots.
 DEFAULT_COMMAND_CATCHUP_INTERVAL = 10.0
+DEFAULT_IDLE_PAUSE_HOURS = 2.0
+# While paused, keep a slow pending-command poll so lighting can wake the bridge without restart.
+IDLE_WAKE_POLL_SECONDS = 30.0
+IDLE_WATCHDOG_SECONDS = 60.0
 MIN_STATE_INTERVAL = 30.0
 MIN_HEARTBEAT_INTERVAL = 30.0
 MIN_COMMAND_CATCHUP_INTERVAL = 5.0
@@ -95,6 +99,12 @@ def read_config() -> dict[str, Any]:
     raw_catchup = parse_interval_env("POLL_INTERVAL_SECONDS", DEFAULT_COMMAND_CATCHUP_INTERVAL)
     raw_state = parse_interval_env("STATE_INTERVAL_SECONDS", DEFAULT_STATE_INTERVAL)
     raw_heartbeat = parse_interval_env("HEARTBEAT_INTERVAL_SECONDS", DEFAULT_HEARTBEAT_INTERVAL)
+    raw_idle_hours = parse_interval_env("IDLE_PAUSE_HOURS", DEFAULT_IDLE_PAUSE_HOURS)
+    # 0 disables idle pause; otherwise clamp to a sane range (5 minutes … 7 days).
+    if raw_idle_hours <= 0:
+        idle_pause_seconds = 0.0
+    else:
+        idle_pause_seconds = max(5 * 60.0, min(raw_idle_hours * 3600.0, 7 * 24 * 3600.0))
 
     return {
         "org_id": org_id,
@@ -121,6 +131,7 @@ def read_config() -> dict[str, Any]:
             minimum=MIN_HEARTBEAT_INTERVAL,
             default=DEFAULT_HEARTBEAT_INTERVAL,
         ),
+        "idle_pause_seconds": idle_pause_seconds,
     }
 
 
@@ -294,6 +305,10 @@ class BridgeRuntime:
         self._command_lock = threading.Lock()
         self._in_flight_commands: set[str] = set()
         self._listen_watch = None
+        self._paused = False
+        self._pause_lock = threading.Lock()
+        self._last_command_activity = time.monotonic()
+        self._wake = threading.Event()
 
         self.firebase._on_write = self._write_limiter.note_write  # noqa: SLF001 — intentional wiring
         self.firebase._on_auth_failure = self._handle_auth_failure  # noqa: SLF001
@@ -310,6 +325,7 @@ class BridgeRuntime:
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
         watch = self._listen_watch
         if watch is not None:
             try:
@@ -317,6 +333,73 @@ class BridgeRuntime:
             except Exception:  # noqa: BLE001
                 pass
             self._listen_watch = None
+
+    def _note_command_activity(self) -> None:
+        self._last_command_activity = time.monotonic()
+
+    def _is_paused(self) -> bool:
+        with self._pause_lock:
+            return self._paused
+
+    def _publish_device_status(self, status: str) -> None:
+        if not self._wait_if_circuit_open():
+            return
+        self.firebase.upsert_document(
+            f"organizations/{self.config['org_id']}/integrations/homeAssistantBridge/devices/{self.config['device_id']}",
+            {
+                "id": self.config["device_id"],
+                "organizationId": self.config["org_id"],
+                "setupId": self.config["setup_id"],
+                "lastSeen": utc_now_iso(),
+                "status": status,
+                "version": VERSION,
+                "hostname": socket.gethostname(),
+            },
+        )
+
+    def _enter_idle_pause(self) -> None:
+        with self._pause_lock:
+            if self._paused:
+                return
+            self._paused = True
+        hours = self.config["idle_pause_seconds"] / 3600.0
+        LOG.info(
+            "Idle pause: no lighting commands for %.1fh — pausing heartbeat/state writes. "
+            "Will auto-resume on the next pending command (no add-on restart needed).",
+            hours,
+        )
+        try:
+            self._publish_device_status("idle")
+        except Exception as error:  # noqa: BLE001
+            LOG.warning("Could not publish idle device status: %s", error)
+
+    def _wake_from_pause(self, reason: str) -> None:
+        with self._pause_lock:
+            was_paused = self._paused
+            self._paused = False
+        self._note_command_activity()
+        self._wake.set()
+        if not was_paused:
+            return
+        LOG.info("Resuming from idle pause (%s).", reason)
+        try:
+            self._publish_device_status("online")
+        except Exception as error:  # noqa: BLE001
+            LOG.warning("Could not publish online device status after wake: %s", error)
+        try:
+            self.publish_state_snapshot(force=True)
+        except Exception as error:  # noqa: BLE001
+            LOG.warning("Could not publish state after wake: %s", error)
+
+    def _maybe_enter_idle_pause(self) -> None:
+        idle_after = float(self.config.get("idle_pause_seconds") or 0)
+        if idle_after <= 0:
+            return
+        if self._is_paused():
+            return
+        idle_for = time.monotonic() - self._last_command_activity
+        if idle_for >= idle_after:
+            self._enter_idle_pause()
 
     def _wait_if_circuit_open(self) -> bool:
         if self._write_limiter.allow():
@@ -348,21 +431,14 @@ class BridgeRuntime:
 
     def heartbeat_loop(self) -> None:
         while not self._stop.is_set():
+            if self._is_paused():
+                # Stay quiet while idle; wake poll / listen will resume us.
+                self._stop.wait(IDLE_WATCHDOG_SECONDS)
+                continue
             if not self._wait_if_circuit_open():
                 continue
             try:
-                self.firebase.upsert_document(
-                    f"organizations/{self.config['org_id']}/integrations/homeAssistantBridge/devices/{self.config['device_id']}",
-                    {
-                        "id": self.config["device_id"],
-                        "organizationId": self.config["org_id"],
-                        "setupId": self.config["setup_id"],
-                        "lastSeen": utc_now_iso(),
-                        "status": "online",
-                        "version": VERSION,
-                        "hostname": socket.gethostname(),
-                    },
-                )
+                self._publish_device_status("online")
             except Exception as error:  # noqa: BLE001
                 LOG.warning("Heartbeat failed: %s", error)
                 if self._fatal.is_set():
@@ -370,6 +446,8 @@ class BridgeRuntime:
             self._stop.wait(self.config["heartbeat_interval"])
 
     def publish_state_snapshot(self, *, force: bool = False) -> None:
+        if self._is_paused() and not force:
+            return
         if not self._wait_if_circuit_open():
             return
         org_doc = self.firebase.get_document(f"organizations/{self.config['org_id']}")
@@ -396,6 +474,9 @@ class BridgeRuntime:
 
     def state_loop(self) -> None:
         while not self._stop.is_set():
+            if self._is_paused():
+                self._stop.wait(IDLE_WATCHDOG_SECONDS)
+                continue
             try:
                 self.publish_state_snapshot(force=False)
             except Exception as error:  # noqa: BLE001
@@ -408,6 +489,8 @@ class BridgeRuntime:
         status = str(command.get("status", ""))
         if status in {"applied", "failed"}:
             return
+
+        self._wake_from_pause(f"command {command_id}")
 
         with self._command_lock:
             if command_id in self._in_flight_commands:
@@ -447,6 +530,7 @@ class BridgeRuntime:
                 "status": "processing",
                 "processingStartedAt": now,
             })
+            self._note_command_activity()
 
             try:
                 command_type = str(command.get("type", ""))
@@ -512,6 +596,9 @@ class BridgeRuntime:
         for command_id, command in processing:
             todo.append((command_id, command))
 
+        if todo:
+            self._wake_from_pause(f"{len(todo)} queued command(s)")
+
         for command_id, command in todo:
             if self._stop.is_set():
                 break
@@ -550,7 +637,6 @@ class BridgeRuntime:
                 self._session.refresh_with_token(self._session.refresh_token)
                 self.token = self._session.id_token
                 self.expiry = datetime.now(timezone.utc) + timedelta(minutes=50)
-                # refresh_with_token already persists via on_credentials_rotated; keep a fallback.
                 try:
                     save_credentials(self._session.refresh_token, runtime.config["device_id"])
                 except Exception:  # noqa: BLE001
@@ -596,20 +682,47 @@ class BridgeRuntime:
             return False
 
     def command_catchup_loop(self) -> None:
-        """Catch-up poll + reclaim stuck processing (complements listen push)."""
+        """Catch-up poll + reclaim stuck processing (complements listen push).
+
+        While idle-paused, keeps a slower pending poll so the bridge can wake without restart.
+        Also refreshes Firebase auth via REST so long idle periods do not brick the session.
+        """
         while not self._stop.is_set():
             try:
+                # Keep ID token fresh even while paused (fixes the old ~60min stall).
+                self.firebase.ensure_fresh_token()
                 count = self._drain_pending_and_stale()
                 if count:
                     LOG.info("Catch-up processed %s command(s)", count)
+                else:
+                    self._maybe_enter_idle_pause()
             except Exception as error:  # noqa: BLE001
                 LOG.warning("Command catch-up failed: %s", error)
                 if self._fatal.is_set():
                     return
-            self._stop.wait(self.config["command_catchup_interval"])
+            wait_s = (
+                IDLE_WAKE_POLL_SECONDS
+                if self._is_paused()
+                else self.config["command_catchup_interval"]
+            )
+            self._wake.clear()
+            self._wake.wait(wait_s)
+            if self._stop.is_set():
+                return
+
+    def idle_watchdog_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._maybe_enter_idle_pause()
+            except Exception as error:  # noqa: BLE001
+                LOG.warning("Idle watchdog failed: %s", error)
+            self._stop.wait(IDLE_WATCHDOG_SECONDS)
 
     def cleanup_loop(self) -> None:
         while not self._stop.is_set():
+            if self._is_paused():
+                self._stop.wait(IDLE_WATCHDOG_SECONDS)
+                continue
             try:
                 if self._wait_if_circuit_open():
                     cutoff = datetime.now(timezone.utc) - timedelta(seconds=COMMAND_TTL_SECONDS)
@@ -637,9 +750,10 @@ class BridgeRuntime:
             self._stop.wait(COMMAND_CLEANUP_INTERVAL)
 
     def run(self) -> None:
+        idle_hours = self.config["idle_pause_seconds"] / 3600.0 if self.config["idle_pause_seconds"] else 0
         LOG.info(
             "Starting Firestore HA bridge v%s (org=%s setup=%s device=%s) "
-            "state=%ss heartbeat=%ss command_catchup=%ss",
+            "state=%ss heartbeat=%ss command_catchup=%ss idle_pause=%s",
             VERSION,
             self.config["org_id"],
             self.config["setup_id"],
@@ -647,8 +761,9 @@ class BridgeRuntime:
             int(self.config["state_interval"]),
             int(self.config["heartbeat_interval"]),
             int(self.config["command_catchup_interval"]),
+            f"{idle_hours:.1f}h" if idle_hours else "off",
         )
-        self.ha.ping()
+        self._note_command_activity()
         self._start_firestore_listen()
 
         threads = [
@@ -656,6 +771,7 @@ class BridgeRuntime:
             threading.Thread(target=self.state_loop, name="state", daemon=True),
             threading.Thread(target=self.command_catchup_loop, name="command-catchup", daemon=True),
             threading.Thread(target=self.cleanup_loop, name="cleanup", daemon=True),
+            threading.Thread(target=self.idle_watchdog_loop, name="idle-watchdog", daemon=True),
         ]
         for thread in threads:
             thread.start()

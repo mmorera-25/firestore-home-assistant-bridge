@@ -1,5 +1,5 @@
 name: Firestore HA Bridge
-version: 0.1.13
+version: 0.1.14
 slug: firestore_ha_bridge
 description: Outbound Firestore listener for remote Home Assistant lighting (no public HA URL on clients)
 url: https://github.com/mmorera-25/firestore-home-assistant-bridge
@@ -22,6 +22,7 @@ options:
   poll_interval_seconds: 10
   state_interval_seconds: 60
   heartbeat_interval_seconds: 60
+  idle_pause_hours: 2
 schema:
   org_id: password
   setup_id: password
@@ -36,5 +37,7 @@ schema:
   poll_interval_seconds: int(1,300)?
   state_interval_seconds: int(1,300)?
   heartbeat_interval_seconds: int(1,300)?
+  # Hours with no lighting commands before pausing heartbeat/state (0 = never pause). Auto-resumes on next command.
+  idle_pause_hours: float(0,168)?
 map:
   - data

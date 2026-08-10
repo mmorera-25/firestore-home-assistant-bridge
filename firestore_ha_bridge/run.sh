@@ -17,5 +17,6 @@ export FIREBASE_PROJECT_ID="$(bashio::config 'firebase_project_id')"
 export POLL_INTERVAL_SECONDS="$(bashio::config 'poll_interval_seconds')"
 export STATE_INTERVAL_SECONDS="$(bashio::config 'state_interval_seconds')"
 export HEARTBEAT_INTERVAL_SECONDS="$(bashio::config 'heartbeat_interval_seconds')"
+export IDLE_PAUSE_HOURS="$(bashio::config 'idle_pause_hours')"
 
 exec python3 /app/bridge/main.py
