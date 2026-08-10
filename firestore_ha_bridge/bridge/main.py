@@ -20,7 +20,7 @@ from ha_client import HomeAssistantClient
 from supervisor_options import clear_pairing_code_option, persist_device_id_option, request_addon_restart
 
 LOG = logging.getLogger("firestore-ha-bridge")
-VERSION = os.environ.get("ADDON_VERSION", "0.1.10").strip() or "0.1.10"
+VERSION = os.environ.get("ADDON_VERSION", "0.1.11").strip() or "0.1.11"
 DATA_DIR = Path(os.environ.get("FIRESTORE_BRIDGE_DATA_DIR", "/data"))
 CREDENTIALS_PATH = DATA_DIR / "bridge_credentials.json"
 
