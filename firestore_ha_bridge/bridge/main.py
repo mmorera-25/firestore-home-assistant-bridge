@@ -20,7 +20,7 @@ from ha_client import HomeAssistantClient
 from supervisor_options import clear_pairing_code_option, persist_device_id_option, request_addon_restart
 
 LOG = logging.getLogger("firestore-ha-bridge")
-VERSION = os.environ.get("ADDON_VERSION", "0.1.12").strip() or "0.1.12"
+VERSION = os.environ.get("ADDON_VERSION", "0.1.13").strip() or "0.1.13"
 DATA_DIR = Path(os.environ.get("FIRESTORE_BRIDGE_DATA_DIR", "/data"))
 CREDENTIALS_PATH = DATA_DIR / "bridge_credentials.json"
 
@@ -150,10 +150,11 @@ def clear_credentials() -> None:
 
 def save_credentials(refresh_token: str, device_id: str) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    CREDENTIALS_PATH.write_text(
-        json.dumps({"refresh_token": refresh_token, "device_id": device_id}, indent=2),
-        encoding="utf-8",
-    )
+    payload = json.dumps({"refresh_token": refresh_token, "device_id": device_id}, indent=2)
+    # Atomic replace so a mid-write power loss during update/restart cannot corrupt creds.
+    temp_path = CREDENTIALS_PATH.with_suffix(".tmp")
+    temp_path.write_text(payload, encoding="utf-8")
+    os.replace(temp_path, CREDENTIALS_PATH)
 
 
 def pair_device(config: dict[str, Any], firebase: FirebaseSession) -> FirebaseSession:
@@ -265,17 +266,18 @@ def extract_light_entity_ids(org_doc: dict[str, Any] | None, setup_id: str) -> l
 
 
 def lights_signature(lights: list[dict[str, Any]]) -> str:
+    """Fingerprint HA light snapshots (entity_id + state + brightness)."""
     normalized = sorted(
         (
             {
-                "entityId": str(entry.get("entityId", "")),
+                "entity_id": str(entry.get("entity_id") or entry.get("entityId") or ""),
                 "state": str(entry.get("state", "")),
                 "brightnessPct": entry.get("brightnessPct"),
             }
             for entry in lights
             if isinstance(entry, dict)
         ),
-        key=lambda entry: entry["entityId"],
+        key=lambda entry: entry["entity_id"],
     )
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
 
@@ -322,6 +324,27 @@ class BridgeRuntime:
         remaining = self._write_limiter.pause_remaining()
         self._stop.wait(min(max(remaining, 1.0), 60.0))
         return False
+
+    def _patch_command_fields(self, path: str, fields: dict[str, Any]) -> None:
+        """Retry status patches so transient network blips do not leave commands stuck."""
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                self.firebase.patch_document(path, fields)
+                return
+            except Exception as error:  # noqa: BLE001
+                last_error = error
+                LOG.warning(
+                    "Command patch attempt %s/3 failed for %s: %s",
+                    attempt,
+                    path.rsplit("/", 1)[-1],
+                    error,
+                )
+                if self._fatal.is_set():
+                    break
+                time.sleep(min(2.0 * attempt, 5.0))
+        if last_error:
+            raise last_error
 
     def heartbeat_loop(self) -> None:
         while not self._stop.is_set():
@@ -420,7 +443,7 @@ class BridgeRuntime:
                 LOG.warning("Reclaiming stale processing command %s", command_id)
 
             now = utc_now_iso()
-            self.firebase.patch_document(base_path, {
+            self._patch_command_fields(base_path, {
                 "status": "processing",
                 "processingStartedAt": now,
             })
@@ -448,7 +471,7 @@ class BridgeRuntime:
                 else:
                     raise RuntimeError(f"Unsupported command type: {command_type}")
 
-                self.firebase.patch_document(base_path, {
+                self._patch_command_fields(base_path, {
                     "status": "applied",
                     "processedAt": utc_now_iso(),
                 })
@@ -459,11 +482,19 @@ class BridgeRuntime:
                         LOG.warning("Post-command state publish failed: %s", error)
             except Exception as error:  # noqa: BLE001
                 LOG.exception("Command %s failed", command_id)
-                self.firebase.patch_document(base_path, {
-                    "status": "failed",
-                    "processedAt": utc_now_iso(),
-                    "errorMessage": str(error),
-                })
+                try:
+                    self._patch_command_fields(base_path, {
+                        "status": "failed",
+                        "processedAt": utc_now_iso(),
+                        "errorMessage": str(error),
+                    })
+                except Exception as patch_error:  # noqa: BLE001
+                    LOG.error(
+                        "Could not mark command %s failed after HA error (%s): %s",
+                        command_id,
+                        error,
+                        patch_error,
+                    )
         finally:
             with self._command_lock:
                 self._in_flight_commands.discard(command_id)
@@ -668,12 +699,34 @@ def main() -> int:
     )
     config = read_config()
     validate_config(config)
+    LOG.info(
+        "Config ready (org=%s setup=%s device=%s credentials=%s)",
+        config["org_id"],
+        config["setup_id"],
+        config["device_id"],
+        "yes" if load_credentials() else "no",
+    )
     firebase = FirebaseSession(
         api_key=config["firebase_api_key"],
         project_id=config["firebase_project_id"],
     )
     firebase = resolve_firebase_session(config, firebase)
     ha = HomeAssistantClient(config["ha_base_url"], config["ha_access_token"])
+    # Do not crash-loop the add-on if HA is briefly down during Supervisor update/restart.
+    for attempt in range(1, 7):
+        try:
+            ha.ping()
+            break
+        except Exception as error:  # noqa: BLE001
+            if attempt >= 6:
+                LOG.warning(
+                    "Home Assistant not reachable after %s attempts (%s). Starting bridge anyway.",
+                    attempt,
+                    error,
+                )
+                break
+            LOG.warning("Home Assistant ping failed (attempt %s/6): %s", attempt, error)
+            time.sleep(5)
     runtime = BridgeRuntime(config, firebase, ha)
     runtime.run()
     return 0

@@ -15,12 +15,20 @@ AuthFailureCallback = Callable[[str], None]
 WriteMeterCallback = Callable[[], None]
 CredentialsRotatedCallback = Callable[[str], None]
 
-# Only these mean stored credentials are dead and must be cleared / re-paired.
+# Refresh / sign-in failures that mean stored credentials are dead.
 _HARD_AUTH_FAILURE_MARKERS = (
     "USER_DISABLED",
     "USER_NOT_FOUND",
     "INVALID_REFRESH_TOKEN",
     "TOKEN_EXPIRED",
+)
+
+# Firestore 401/403 bodies that should wipe credentials. Keep this narrow —
+# transient UNAUTHENTICATED / rules denials must NOT brick a paired Pi.
+_FATAL_FIRESTORE_AUTH_MARKERS = (
+    "USER_DISABLED",
+    "USER_NOT_FOUND",
+    "INVALID_REFRESH_TOKEN",
 )
 
 # Refresh ID token before this many seconds of age (Firebase tokens last ~3600s).
@@ -193,13 +201,16 @@ class FirebaseSession:
     def _is_hard_auth_failure(self, text: str) -> bool:
         return any(marker in text for marker in _HARD_AUTH_FAILURE_MARKERS)
 
+    def _is_fatal_firestore_auth(self, text: str) -> bool:
+        return any(marker in text for marker in _FATAL_FIRESTORE_AUTH_MARKERS)
+
     def _raise_for_auth(self, response: requests.Response, action: str) -> None:
         if response.status_code not in {401, 403}:
             return
         text = response.text
         # Never wipe credentials on transient UNAUTHENTICATED / rules denials —
         # those used to brick paired Pis until manual re-pair.
-        if self._on_auth_failure and self._is_hard_auth_failure(text):
+        if self._on_auth_failure and self._is_fatal_firestore_auth(text):
             self._on_auth_failure(text)
         raise RuntimeError(f"Firestore {action} failed ({response.status_code}): {text}")
 

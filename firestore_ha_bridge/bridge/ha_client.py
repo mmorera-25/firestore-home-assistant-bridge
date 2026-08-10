@@ -85,9 +85,18 @@ class HomeAssistantClient:
             state = by_id.get(normalized)
             if not state:
                 continue
-            lights.append({
+            attributes = state.get("attributes") if isinstance(state.get("attributes"), dict) else {}
+            brightness_pct: int | None = None
+            raw_brightness = attributes.get("brightness")
+            if isinstance(raw_brightness, (int, float)) and raw_brightness >= 0:
+                # HA brightness is 0–255.
+                brightness_pct = max(1, min(100, int(round((float(raw_brightness) / 255.0) * 100))))
+            entry: dict[str, Any] = {
                 "entity_id": normalized,
                 "state": str(state.get("state", "unknown")),
-                "attributes": state.get("attributes") if isinstance(state.get("attributes"), dict) else {},
-            })
+                "attributes": attributes,
+            }
+            if brightness_pct is not None and str(entry["state"]).lower() == "on":
+                entry["brightnessPct"] = brightness_pct
+            lights.append(entry)
         return lights

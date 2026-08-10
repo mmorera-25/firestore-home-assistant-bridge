@@ -11,9 +11,9 @@ LABEL \
 
 WORKDIR /app
 COPY requirements.txt ./
-# Core dependency must install; google listen SDKs are best-effort (REST poll is primary).
-RUN pip3 install --no-cache-dir --break-system-packages 'requests>=2.31.0' \
-  && pip3 install --no-cache-dir --break-system-packages 'google-auth>=2.29.0' 'google-cloud-firestore>=2.16.0' \
+# requests is required. google listen SDKs are optional so Alpine/arm builds never brick the update.
+RUN pip3 install --no-cache-dir --break-system-packages 'requests>=2.31.0'
+RUN pip3 install --no-cache-dir --break-system-packages 'google-auth>=2.29.0' 'google-cloud-firestore>=2.16.0' \
   || echo "WARN: google-cloud-firestore unavailable on this arch; bridge will use catch-up poll only."
 
 COPY bridge ./bridge
