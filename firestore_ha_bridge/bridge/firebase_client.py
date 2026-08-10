@@ -4,7 +4,7 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 import requests
@@ -13,6 +13,18 @@ LOG = logging.getLogger("firestore-ha-bridge.firebase")
 
 AuthFailureCallback = Callable[[str], None]
 WriteMeterCallback = Callable[[], None]
+CredentialsRotatedCallback = Callable[[str], None]
+
+# Only these mean stored credentials are dead and must be cleared / re-paired.
+_HARD_AUTH_FAILURE_MARKERS = (
+    "USER_DISABLED",
+    "USER_NOT_FOUND",
+    "INVALID_REFRESH_TOKEN",
+    "TOKEN_EXPIRED",
+)
+
+# Refresh ID token before this many seconds of age (Firebase tokens last ~3600s).
+_ID_TOKEN_REFRESH_AFTER_SECONDS = 50 * 60
 
 
 def _convert_firestore_value(value: Any) -> Any:
@@ -86,6 +98,7 @@ class FirebaseSession:
         *,
         on_auth_failure: AuthFailureCallback | None = None,
         on_write: WriteMeterCallback | None = None,
+        on_credentials_rotated: CredentialsRotatedCallback | None = None,
     ) -> None:
         self.api_key = api_key
         self.project_id = project_id
@@ -93,8 +106,20 @@ class FirebaseSession:
         self.refresh_token = ""
         self._on_auth_failure = on_auth_failure
         self._on_write = on_write
+        self._on_credentials_rotated = on_credentials_rotated
         self._known_documents: set[str] = set()
         self._lock = threading.Lock()
+        self._id_token_acquired_at = 0.0
+
+    def _mark_id_token_fresh(self) -> None:
+        self._id_token_acquired_at = time.monotonic()
+
+    def _notify_credentials_rotated(self) -> None:
+        if self._on_credentials_rotated and self.refresh_token:
+            try:
+                self._on_credentials_rotated(self.refresh_token)
+            except Exception as error:  # noqa: BLE001
+                LOG.warning("Could not persist rotated Firebase credentials: %s", error)
 
     def sign_in_with_custom_token(self, custom_token: str) -> None:
         response = requests.post(
@@ -109,6 +134,8 @@ class FirebaseSession:
         self.refresh_token = str(payload.get("refreshToken", ""))
         if not self.id_token or not self.refresh_token:
             raise RuntimeError("Firebase sign-in response missing tokens.")
+        self._mark_id_token_fresh()
+        self._notify_credentials_rotated()
 
     def refresh_with_token(self, refresh_token: str) -> None:
         response = requests.post(
@@ -121,17 +148,33 @@ class FirebaseSession:
         )
         if not response.ok:
             text = response.text
-            if any(marker in text for marker in ("USER_DISABLED", "USER_NOT_FOUND", "TOKEN_EXPIRED", "INVALID_REFRESH_TOKEN")):
+            if any(marker in text for marker in _HARD_AUTH_FAILURE_MARKERS):
                 if self._on_auth_failure:
                     self._on_auth_failure(text)
             raise RuntimeError(f"Firebase token refresh failed: {text}")
         payload = response.json()
         self.id_token = str(payload.get("id_token", ""))
-        self.refresh_token = str(payload.get("refresh_token", refresh_token))
+        new_refresh = str(payload.get("refresh_token", "")).strip()
+        if new_refresh:
+            self.refresh_token = new_refresh
+        elif refresh_token:
+            self.refresh_token = refresh_token
         if not self.id_token:
             raise RuntimeError("Firebase refresh response missing id_token.")
+        self._mark_id_token_fresh()
+        self._notify_credentials_rotated()
+
+    def ensure_fresh_token(self, *, force: bool = False) -> None:
+        """Refresh the ID token before REST calls so long-running poll mode stays authed."""
+        if not self.refresh_token:
+            return
+        age = time.monotonic() - self._id_token_acquired_at
+        if not force and self.id_token and age < _ID_TOKEN_REFRESH_AFTER_SECONDS:
+            return
+        self.refresh_with_token(self.refresh_token)
 
     def _auth_headers(self) -> dict[str, str]:
+        self.ensure_fresh_token()
         if not self.id_token:
             raise RuntimeError("Firebase session is not authenticated.")
         return {"Authorization": f"Bearer {self.id_token}"}
@@ -147,20 +190,65 @@ class FirebaseSession:
         if self._on_write:
             self._on_write()
 
+    def _is_hard_auth_failure(self, text: str) -> bool:
+        return any(marker in text for marker in _HARD_AUTH_FAILURE_MARKERS)
+
     def _raise_for_auth(self, response: requests.Response, action: str) -> None:
-        if response.status_code in {401, 403}:
-            text = response.text
-            if self._on_auth_failure and any(
-                marker in text for marker in ("USER_DISABLED", "USER_NOT_FOUND", "Missing or insufficient permissions", "UNAUTHENTICATED")
-            ):
-                self._on_auth_failure(text)
-            raise RuntimeError(f"Firestore {action} failed ({response.status_code}): {text}")
+        if response.status_code not in {401, 403}:
+            return
+        text = response.text
+        # Never wipe credentials on transient UNAUTHENTICATED / rules denials —
+        # those used to brick paired Pis until manual re-pair.
+        if self._on_auth_failure and self._is_hard_auth_failure(text):
+            self._on_auth_failure(text)
+        raise RuntimeError(f"Firestore {action} failed ({response.status_code}): {text}")
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        action: str,
+        params: Any = None,
+        data: str | None = None,
+        allow_404: bool = False,
+    ) -> requests.Response:
+        headers = {**self._auth_headers(), "Content-Type": "application/json"}
+        response = requests.request(
+            method,
+            url,
+            headers=headers,
+            params=params,
+            data=data,
+            timeout=30,
+        )
+        if allow_404 and response.status_code == 404:
+            return response
+        # One retry after forced refresh for expired ID tokens.
+        if response.status_code in {401, 403} and "UNAUTHENTICATED" in response.text:
+            try:
+                self.ensure_fresh_token(force=True)
+            except RuntimeError:
+                self._raise_for_auth(response, action)
+                raise
+            headers = {**self._auth_headers(), "Content-Type": "application/json"}
+            response = requests.request(
+                method,
+                url,
+                headers=headers,
+                params=params,
+                data=data,
+                timeout=30,
+            )
+            if allow_404 and response.status_code == 404:
+                return response
+        self._raise_for_auth(response, action)
+        return response
 
     def get_document(self, path: str) -> dict[str, Any] | None:
-        response = requests.get(self._document_url(path), headers=self._auth_headers(), timeout=30)
+        response = self._request("GET", self._document_url(path), action="get", allow_404=True)
         if response.status_code == 404:
             return None
-        self._raise_for_auth(response, "get")
         if not response.ok:
             raise RuntimeError(f"Firestore get failed ({response.status_code}): {response.text}")
         payload = response.json()
@@ -182,12 +270,13 @@ class FirebaseSession:
             return
 
         # Prefer PATCH for long-lived docs (devices / state) that usually already exist.
-        patch_response = requests.patch(
+        patch_response = self._request(
+            "PATCH",
             self._document_url(path),
-            headers={**self._auth_headers(), "Content-Type": "application/json"},
+            action="patch",
             params=[("updateMask.fieldPaths", key) for key in payload.keys()],
             data=json.dumps({"fields": encode_firestore_fields(payload)}),
-            timeout=30,
+            allow_404=True,
         )
         if patch_response.status_code == 404:
             parent, doc_id = clean.rsplit("/", 1)
@@ -195,12 +284,12 @@ class FirebaseSession:
                 f"https://firestore.googleapis.com/v1/projects/{self.project_id}"
                 f"/databases/(default)/documents/{parent}"
             )
-            create_response = requests.post(
+            create_response = self._request(
+                "POST",
                 create_url,
-                headers={**self._auth_headers(), "Content-Type": "application/json"},
+                action="create",
                 params={"documentId": doc_id},
                 data=json.dumps({"fields": encode_firestore_fields(payload)}),
-                timeout=30,
             )
             if create_response.status_code == 409:
                 with self._lock:
@@ -208,7 +297,6 @@ class FirebaseSession:
                 self.patch_document(path, payload)
                 return
 
-            self._raise_for_auth(create_response, "create")
             if not create_response.ok:
                 raise RuntimeError(
                     f"Firestore upsert failed ({create_response.status_code}): {create_response.text}"
@@ -219,7 +307,6 @@ class FirebaseSession:
             self._note_write()
             return
 
-        self._raise_for_auth(patch_response, "patch")
         if not patch_response.ok:
             raise RuntimeError(
                 f"Firestore patch failed ({patch_response.status_code}): {patch_response.text}"
@@ -229,14 +316,13 @@ class FirebaseSession:
         self._note_write()
 
     def patch_document(self, path: str, payload: dict[str, Any]) -> None:
-        response = requests.patch(
+        response = self._request(
+            "PATCH",
             self._document_url(path),
-            headers={**self._auth_headers(), "Content-Type": "application/json"},
+            action="patch",
             params=[("updateMask.fieldPaths", key) for key in payload.keys()],
             data=json.dumps({"fields": encode_firestore_fields(payload)}),
-            timeout=30,
         )
-        self._raise_for_auth(response, "patch")
         if not response.ok:
             raise RuntimeError(f"Firestore patch failed ({response.status_code}): {response.text}")
         clean = path.strip("/")
@@ -245,10 +331,14 @@ class FirebaseSession:
         self._note_write()
 
     def delete_document(self, path: str) -> None:
-        response = requests.delete(self._document_url(path), headers=self._auth_headers(), timeout=30)
+        response = self._request(
+            "DELETE",
+            self._document_url(path),
+            action="delete",
+            allow_404=True,
+        )
         if response.status_code == 404:
             return
-        self._raise_for_auth(response, "delete")
         if not response.ok:
             raise RuntimeError(f"Firestore delete failed ({response.status_code}): {response.text}")
         with self._lock:
@@ -261,7 +351,7 @@ class FirebaseSession:
         *,
         filters: list[dict[str, Any]],
         limit: int = 20,
-        order_by_issued_at: bool = True,
+        order_by: list[dict[str, Any]] | None = None,
     ) -> list[tuple[str, dict[str, Any]]]:
         parent = (
             f"projects/{self.project_id}/databases/(default)/documents/"
@@ -277,16 +367,15 @@ class FirebaseSession:
             },
             "limit": limit,
         }
-        if order_by_issued_at:
-            structured["orderBy"] = [{"field": {"fieldPath": "issuedAt"}, "direction": "ASCENDING"}]
+        if order_by:
+            structured["orderBy"] = order_by
 
-        response = requests.post(
+        response = self._request(
+            "POST",
             f"https://firestore.googleapis.com/v1/{parent}:runQuery",
-            headers={**self._auth_headers(), "Content-Type": "application/json"},
+            action="query",
             data=json.dumps({"structuredQuery": structured}),
-            timeout=30,
         )
-        self._raise_for_auth(response, "query")
         if not response.ok:
             raise RuntimeError(f"Firestore query failed ({response.status_code}): {response.text}")
 
@@ -320,6 +409,7 @@ class FirebaseSession:
                     },
                 },
             ],
+            order_by=[{"field": {"fieldPath": "issuedAt"}, "direction": "ASCENDING"}],
         )
 
     def query_processing_commands(self, org_id: str, setup_id: str) -> list[tuple[str, dict[str, Any]]]:
@@ -341,7 +431,6 @@ class FirebaseSession:
                     },
                 },
             ],
-            order_by_issued_at=False,
         )
 
     def query_terminal_commands(
@@ -380,7 +469,8 @@ class FirebaseSession:
                 },
             ],
             limit=limit,
-            order_by_issued_at=False,
+            # Inequality on processedAt requires orderBy on the same field (index exists).
+            order_by=[{"field": {"fieldPath": "processedAt"}, "direction": "ASCENDING"}],
         )
 
 

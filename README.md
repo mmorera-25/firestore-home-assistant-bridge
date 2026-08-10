@@ -244,6 +244,8 @@ sequenceDiagram
 
 On first run the add-on calls your pairing API, stores refresh credentials in `/data/bridge_credentials.json`, then uses Firestore until credentials expire or are cleared.
 
+**Quota / auth hardening (v0.1.12+):** REST ID tokens refresh before expiry and rotated refresh tokens are persisted; credential wipe only on hard auth death (not transient 401/403); `org_id` is lowercased to match Edge claims; paired `device_id` wins over edited options; TTL cleanup orders by `processedAt`; google listen SDKs install best-effort so Alpine/arm builds still succeed.
+
 **Quota guards (v0.1.10+):** pending commands use Firestore listen/push (with a slow catch-up poll); state/heartbeat default to 60s and skip unchanged state; PATCH-first upserts after restart; command claim/idempotency + TTL cleanup; write-rate circuit breaker; clean exit on `USER_DISABLED`. Legacy interval options (e.g. poll `2`, state `15`) remain valid in the add-on schema and are clamped in Python.
 
 ---

@@ -20,7 +20,7 @@ from ha_client import HomeAssistantClient
 from supervisor_options import clear_pairing_code_option, persist_device_id_option, request_addon_restart
 
 LOG = logging.getLogger("firestore-ha-bridge")
-VERSION = os.environ.get("ADDON_VERSION", "0.1.11").strip() or "0.1.11"
+VERSION = os.environ.get("ADDON_VERSION", "0.1.12").strip() or "0.1.12"
 DATA_DIR = Path(os.environ.get("FIRESTORE_BRIDGE_DATA_DIR", "/data"))
 CREDENTIALS_PATH = DATA_DIR / "bridge_credentials.json"
 
@@ -67,13 +67,21 @@ def parse_interval_env(name: str, default: float) -> float:
 
 
 def read_config() -> dict[str, Any]:
-    org_id = normalize_optional_config(os.environ.get("ORG_ID", ""))
+    # Edge mints haBridgeOrgId lowercased — path orgId must match the claim.
+    org_id = normalize_optional_config(os.environ.get("ORG_ID", "")).lower()
     setup_id = normalize_optional_config(os.environ.get("SETUP_ID", ""))
-    device_id = normalize_optional_config(os.environ.get("DEVICE_ID", ""))
-    if not device_id:
-        stored = load_credentials()
-        if stored and stored.get("device_id"):
-            device_id = stored["device_id"]
+    option_device_id = normalize_optional_config(os.environ.get("DEVICE_ID", ""))
+    stored = load_credentials()
+    # After pairing, credentials.device_id is claim-bound and wins over edited options.
+    device_id = option_device_id
+    if stored and stored.get("device_id"):
+        if option_device_id and option_device_id != stored["device_id"]:
+            LOG.warning(
+                "DEVICE_ID option %s differs from paired device %s; using paired id.",
+                option_device_id,
+                stored["device_id"],
+            )
+        device_id = stored["device_id"]
     if not device_id:
         device_id = str(uuid.uuid4())
     edge_base_url = normalize_optional_config(os.environ.get("EDGE_BASE_URL", "")).rstrip("/")
@@ -174,6 +182,17 @@ def pair_device(config: dict[str, Any], firebase: FirebaseSession) -> FirebaseSe
     if not custom_token:
         raise RuntimeError("Pairing response did not include customToken.")
 
+    # Prefer server-normalized ids (org lowercased) so Firestore paths match token claims.
+    returned_org = normalize_optional_config(str(payload.get("orgId", ""))).lower()
+    returned_setup = normalize_optional_config(str(payload.get("setupId", "")))
+    returned_device = normalize_optional_config(str(payload.get("deviceId", "")))
+    if returned_org:
+        config["org_id"] = returned_org
+    if returned_setup:
+        config["setup_id"] = returned_setup
+    if returned_device:
+        config["device_id"] = returned_device
+
     firebase.sign_in_with_custom_token(custom_token)
     save_credentials(firebase.refresh_token, config["device_id"])
     LOG.info("Paired bridge device %s for org %s", config["device_id"], config["org_id"])
@@ -188,10 +207,14 @@ def resolve_firebase_session(config: dict[str, Any], firebase: FirebaseSession) 
     if stored:
         try:
             firebase.refresh_with_token(stored["refresh_token"])
+            save_credentials(firebase.refresh_token, config["device_id"])
             return firebase
         except RuntimeError as error:
             text = str(error)
-            if not any(marker in text for marker in ("USER_NOT_FOUND", "USER_DISABLED", "INVALID_REFRESH_TOKEN")):
+            if not any(
+                marker in text
+                for marker in ("USER_NOT_FOUND", "USER_DISABLED", "INVALID_REFRESH_TOKEN", "TOKEN_EXPIRED")
+            ):
                 raise
             LOG.warning(
                 "Stored Firebase credentials are invalid (%s). "
@@ -272,6 +295,10 @@ class BridgeRuntime:
 
         self.firebase._on_write = self._write_limiter.note_write  # noqa: SLF001 — intentional wiring
         self.firebase._on_auth_failure = self._handle_auth_failure  # noqa: SLF001
+        self.firebase._on_credentials_rotated = self._persist_rotated_credentials  # noqa: SLF001
+
+    def _persist_rotated_credentials(self, refresh_token: str) -> None:
+        save_credentials(refresh_token, self.config["device_id"])
 
     def _handle_auth_failure(self, detail: str) -> None:
         LOG.error("Firebase auth failure — stopping bridge: %s", detail)
@@ -375,6 +402,21 @@ class BridgeRuntime:
                 started = parse_firestore_timestamp(command.get("processingStartedAt"))
                 if started and datetime.now(timezone.utc) - started < timedelta(seconds=PROCESSING_STALE_SECONDS):
                     return
+                # Re-read before reclaim so we do not double-apply HA if applied/failed already landed.
+                latest = self.firebase.get_document(base_path)
+                if latest:
+                    latest_status = str(latest.get("status", ""))
+                    if latest_status in {"applied", "failed"}:
+                        return
+                    if latest_status == "processing":
+                        started = parse_firestore_timestamp(latest.get("processingStartedAt"))
+                        if (
+                            started
+                            and datetime.now(timezone.utc) - started
+                            < timedelta(seconds=PROCESSING_STALE_SECONDS)
+                        ):
+                            return
+                    command = latest
                 LOG.warning("Reclaiming stale processing command %s", command_id)
 
             now = utc_now_iso()
@@ -464,6 +506,8 @@ class BridgeRuntime:
             )
             return False
 
+        runtime = self
+
         class _FirebaseUserCredentials(ga_credentials.Credentials):
             def __init__(self, session: FirebaseSession) -> None:
                 super().__init__()
@@ -475,6 +519,11 @@ class BridgeRuntime:
                 self._session.refresh_with_token(self._session.refresh_token)
                 self.token = self._session.id_token
                 self.expiry = datetime.now(timezone.utc) + timedelta(minutes=50)
+                # refresh_with_token already persists via on_credentials_rotated; keep a fallback.
+                try:
+                    save_credentials(self._session.refresh_token, runtime.config["device_id"])
+                except Exception:  # noqa: BLE001
+                    pass
 
             @property
             def expired(self) -> bool:

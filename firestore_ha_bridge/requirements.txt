@@ -1,3 +1,5 @@
 requests>=2.31.0
+# Optional listen push (catch-up poll works without these). Installed best-effort in Dockerfile
+# so Alpine/armv7 images still build if wheels are missing.
 google-cloud-firestore>=2.16.0
 google-auth>=2.29.0
